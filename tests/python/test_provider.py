@@ -6182,8 +6182,11 @@ def test_rows_come_back_without_items(provider):
 def test_row_items_are_that_rows_items(provider):
     _home_provider(provider)
     full = asyncio.run(provider.recommendations())
+    rows = asyncio.run(provider.get_recommendations())
 
-    for row in asyncio.run(provider.get_recommendations()):
+    # Guards the loop below, which would pass vacuously on zero rows.
+    assert len(rows) == len(_HOME_FEED)
+    for row in rows:
         expected = next(folder for folder in full if folder.item_id == row.item_id)
         assert list(_row_items(provider, row.item_id)) == list(expected.items)
 
@@ -6590,10 +6593,18 @@ def test_an_album_by_a_blocked_artist_is_dropped_from_a_home_row(provider):
 
 
 def test_an_album_matches_a_blocked_name_too(provider):
-    _filtered_home_provider(provider, [_home_album(artist_id="UCsomeotherid00000000000")])
+    # The control album proves the row was found and parsed, so an empty
+    # result cannot pass for the right reason by accident.
+    _filtered_home_provider(
+        provider,
+        [
+            _home_album(artist_id="UCsomeotherid00000000000"),
+            _home_album("MPREb_real", "Peter Maffay", "UC2fL1mkImUx_l_YELcZjoJw"),
+        ],
+    )
     provider._ai_blocked_names = frozenset({"sloppy bot"})
 
-    assert list(_row_items(provider, "ytm_rec_for_you")) == []
+    assert [a.item_id for a in _row_items(provider, "ytm_rec_for_you")] == ["MPREb_real"]
 
 
 def test_a_playlist_by_a_blocked_author_id_is_dropped(provider):
@@ -6651,10 +6662,18 @@ def test_a_blocked_artist_card_is_dropped(provider):
 
 
 def test_an_artist_card_matches_a_blocked_name_too(provider):
-    _filtered_home_provider(provider, [_home_artist_card("UCsomeotherid00000000000")])
+    _filtered_home_provider(
+        provider,
+        [
+            _home_artist_card("UCsomeotherid00000000000"),
+            _home_artist_card("UCrealartist000000000000", "Real Band"),
+        ],
+    )
     provider._ai_blocked_names = frozenset({"sloppy bot"})
 
-    assert list(_row_items(provider, "ytm_rec_for_you")) == []
+    assert [a.item_id for a in _row_items(provider, "ytm_rec_for_you")] == [
+        "UCrealartist000000000000"
+    ]
 
 
 def test_a_row_emptied_only_by_non_track_drops_is_omitted(provider):
@@ -6699,6 +6718,38 @@ def test_the_home_feed_logs_one_filter_line_per_row(provider):
 
     lines = [m for m in handler.messages() if m.startswith("AI filter removed")]
     assert lines == ["AI filter removed 2 of 3 items from home feed 'For you'"]
+
+
+def test_a_full_210_page_load_logs_each_row_once_per_call(provider):
+    """One rows call plus one items call per row, as the 2.10 frontend does.
+
+    An items call parses only its own row. Before that, every items call
+    parsed the whole feed and repeated every row's filter and skip lines, so
+    seven rows logged each line eight times per page view.
+    """
+    provider._ai_filter_enabled = True
+    provider._ai_blocked_names = frozenset()
+    provider._ai_blocked_channel_ids = frozenset({_BLOCKED_ID})
+    mystery = {"title": "Mystery", "thumbnails": []}
+    home = [
+        {"title": f"Row {i}", "contents": [_home_song(), _home_album(), mystery]}
+        for i in range(3)
+    ]
+    _home_provider(provider, home)
+    handler = _attach_capture(provider)
+
+    rows = asyncio.run(provider.get_recommendations())
+    assert len(rows) == 3
+    for row in rows:
+        _row_items(provider, row.item_id)
+
+    filter_lines = [m for m in handler.messages() if m.startswith("AI filter removed")]
+    skip_lines = [m for m in handler.messages() if "of unknown shape" in m]
+    for i in range(3):
+        # Once from the rows call, once from that row's own items call.
+        assert filter_lines.count(f"AI filter removed 1 of 2 items from home feed 'Row {i}'") == 2
+    assert len(filter_lines) == 6
+    assert len(skip_lines) == 6
 
 
 def test_track_only_callers_behave_as_before(provider):

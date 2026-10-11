@@ -322,11 +322,12 @@ def _install_music_assistant_models() -> None:
         fully_played: bool | None = None
         resume_position_ms: int | None = None
 
-    # Exactly these four fields, on purpose. They are all Music Assistant 2.9's
-    # models (1.1.129.post1) know, and that kw_only dataclass raises TypeError
-    # on any other keyword. Upstream 2.10 added type, enabled_by_default and
-    # more; adding them here would let the provider pass one and still go green
-    # while it fails to build rows on 2.9. Pinned in tests/ma_contract.py.
+    # Exactly these four fields, on purpose: the ones the provider passes.
+    # Music Assistant 2.9's models (1.1.129.post1) raise TypeError on the
+    # keywords 2.10 added (type, enabled_by_default, supports_provider_filter);
+    # adding those here would let the provider pass one and still go green
+    # while it fails to build rows on 2.9. Keeping the stub at four makes any
+    # new keyword a deliberate decision. Pinned in tests/ma_contract.py.
     # Issue #96.
     @dataclass
     class _RecommendationFolder:

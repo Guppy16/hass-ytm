@@ -242,14 +242,14 @@ SIMILAR_TRACKS_CACHE_TTL = 24 * 3600
 # official ytmusic provider cached get_home for on 2.9. Music Assistant 2.10
 # asks for the rows and then for each row's items in separate calls, and every
 # one of them reads this one entry, so the whole Discover page costs a single
-# request. The raw payload is cached rather than the parsed rows so the AI
+# get_home call. The raw payload is cached rather than the parsed rows so the AI
 # filter runs on every read and a blocklist edit applies at once.
 HOME_FEED_CACHE_TTL = 3600
 
-# Passed to get_home as its limit. ytmusicapi treats it as a minimum, not a cap:
-# it keeps requesting continuation pages until it holds at least this many
-# rows, and never slices the result. The first page carries about two rows and
-# each continuation request about three more, one sequential request each.
+# Passed to get_home as its limit. ytmusicapi treats it as a minimum: it keeps
+# requesting continuation pages until it holds at least this many rows, and
+# never slices the result. The first page carries about two rows and each
+# continuation request about three more, one sequential request each.
 # Six measured seven rows from three requests. Higher values cost more requests
 # on a cold cache, and the rows call runs under a 5 s timeout on Music
 # Assistant 2.10.
@@ -3391,13 +3391,13 @@ class YoutubeMusicFreeProvider(MusicProvider):
     # ------------------------------------------------------------------
     # Recommendations (home feed)
     #
-    # Two server generations, two hook families, one shared parse. Music
-    # Assistant 2.9.x and 2.10.0b0 to b7 call only recommendations(), which
-    # returns rows with their items. 2.10.0b8 and later call only
+    # Music Assistant 2.9.x and 2.10.0b0 to b7 call only recommendations(),
+    # which returns rows with their items. 2.10.0b8 and later call only
     # get_recommendations() for the rows and get_recommendation_items() per
     # row, and their base versions raise NotImplementedError once
     # RECOMMENDATIONS is declared. No server calls both, so no version check
-    # is needed; same arrangement as get_config_entries. Issue #96.
+    # is needed; same arrangement as get_config_entries. Both hook families
+    # share one parse. Issue #96.
     # ------------------------------------------------------------------
 
     async def recommendations(self) -> list[RecommendationFolder]:
@@ -3413,8 +3413,9 @@ class YoutubeMusicFreeProvider(MusicProvider):
         empties is left out, so the listing never shows a shelf that opens
         empty.
         """
-        # Only the four fields Music Assistant 2.9's models know. Their
-        # RecommendationFolder rejects any other keyword with a TypeError.
+        # Only these four keywords. Music Assistant 2.9's models (1.1.129.post1)
+        # raise TypeError on the ones 2.10 added (type, enabled_by_default,
+        # supports_provider_filter), so none of those may be passed.
         return [
             RecommendationFolder(
                 item_id=row.item_id, provider=row.provider, name=row.name, items=UniqueList()
@@ -3431,9 +3432,13 @@ class YoutubeMusicFreeProvider(MusicProvider):
         personalised, so a payload refreshed between the rows call and this
         one can legitimately no longer carry the row.
         """
-        for row in await self._home_feed_rows():
-            if row.item_id == item_id:
-                return row.items
+        # Only the asked-for row is parsed. 2.10 sends one of these calls per
+        # row on every Discover load, and parsing the whole feed each time
+        # repeated every row's AI filter and skip debug lines once per row.
+        for section, title, row_id in await self._home_feed_sections():
+            if row_id == item_id:
+                row = self._home_feed_row(section, title, row_id)
+                return row.items if row is not None else UniqueList()
         return UniqueList()
 
     @use_cache(HOME_FEED_CACHE_TTL, allow_expired_cache=True)
@@ -3464,6 +3469,20 @@ class YoutubeMusicFreeProvider(MusicProvider):
         schedule a blocklist refresh, which needs the running loop; it is a
         few dozen small dicts.
         """
+        rows: list[RecommendationFolder] = []
+        for section, title, row_id in await self._home_feed_sections():
+            row = self._home_feed_row(section, title, row_id)
+            if row is not None:
+                rows.append(row)
+        return rows
+
+    async def _home_feed_sections(self) -> list[tuple[dict[str, Any], str, str]]:
+        """The cached home feed's sections with their titles and row ids, unparsed.
+
+        Row ids are assigned over every title before any filtering, so a row
+        keeps its id whether or not the AI filter empties a row before it.
+        Never raises, for the same reason as _home_feed_rows.
+        """
         if not self._authenticated or self._ytmusic is None:
             return []
         try:
@@ -3478,31 +3497,33 @@ class YoutubeMusicFreeProvider(MusicProvider):
             if isinstance(section, dict) and isinstance(section.get("contents"), list)
         ]
         titles = [str(section.get("title") or "Recommendations") for section in sections]
-        rows: list[RecommendationFolder] = []
-        for section, title, row_id in zip(sections, titles, _home_row_ids(titles), strict=True):
-            items: list[Any] = []
-            credited_to: list[list[ItemMapping] | None] = []
-            for content in section["contents"]:
-                item = self._parse_home_item(content)
-                if item is None:
-                    continue
-                items.append(item)
-                credited_to.append(
-                    self._home_playlist_credits(content) if isinstance(item, Playlist) else None
-                )
-            # One filter call per row, so the debug log says how much of each
-            # shelf went rather than one line per item.
-            items = self._drop_ai_items(items, f"home feed '{title}'", credited_to)
-            if items:
-                rows.append(
-                    RecommendationFolder(
-                        item_id=row_id,
-                        provider=self.instance_id,
-                        name=title,
-                        items=UniqueList(items),
-                    )
-                )
-        return rows
+        return list(zip(sections, titles, _home_row_ids(titles), strict=True))
+
+    def _home_feed_row(
+        self, section: dict[str, Any], title: str, row_id: str
+    ) -> RecommendationFolder | None:
+        """One home feed section as a row, AI filter applied, or None if that empties it."""
+        items: list[Any] = []
+        credited_to: list[list[ItemMapping] | None] = []
+        for content in section["contents"]:
+            item = self._parse_home_item(content)
+            if item is None:
+                continue
+            items.append(item)
+            credited_to.append(
+                self._home_playlist_credits(content) if isinstance(item, Playlist) else None
+            )
+        # One filter call per row, so the debug log says how much of each
+        # shelf went rather than one line per item.
+        items = self._drop_ai_items(items, f"home feed '{title}'", credited_to)
+        if not items:
+            return None
+        return RecommendationFolder(
+            item_id=row_id,
+            provider=self.instance_id,
+            name=title,
+            items=UniqueList(items),
+        )
 
     def _parse_home_item(
         self, content: Any

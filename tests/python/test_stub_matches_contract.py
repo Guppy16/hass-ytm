@@ -212,13 +212,14 @@ def test_stub_item_mapping_has_the_required_fields():
 def test_stub_recommendation_folder_has_the_required_fields():
     """Exactly the four, so a 2.10-only keyword raises TypeError in this suite.
 
-    That is the property that keeps the provider loadable on Music Assistant
-    2.9, whose models reject any other keyword. Issue #96.
+    That keeps the provider loadable on Music Assistant 2.9, whose models
+    reject the keywords 2.10 added (type, enabled_by_default,
+    supports_provider_filter). Issue #96.
     """
     fields = {f.name for f in dataclasses.fields(RecommendationFolder)}
     assert fields == set(ma_contract.REQUIRED_RECOMMENDATION_FOLDER_FIELDS), (
-        f"stub RecommendationFolder has {sorted(fields)}; keep it at exactly the fields "
-        "Music Assistant 2.9 accepts"
+        f"stub RecommendationFolder has {sorted(fields)}; keep it at the four fields "
+        "the provider passes, since 2.10-only keywords fail on Music Assistant 2.9"
     )
 
 

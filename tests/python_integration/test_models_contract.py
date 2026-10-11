@@ -153,8 +153,9 @@ def test_item_mapping_exposes_the_fields_the_provider_sets(real_models):
 def test_recommendation_folder_builds_from_the_provider_fields(real_models):
     """The provider builds every row from these four keywords and no others.
 
-    They are all Music Assistant 2.9's models accept, so the provider cannot
-    pass more. If upstream ever adds a required field, construction fails here
+    Music Assistant 2.9's models reject the keywords 2.10 added (type,
+    enabled_by_default, supports_provider_filter), so the provider passes none
+    of those. If upstream ever adds a required field, construction fails here
     rather than every row failing to build in front of a user. Issue #96.
     """
     folder_cls = real_models.media_items.RecommendationFolder
@@ -168,8 +169,15 @@ def test_recommendation_folder_builds_from_the_provider_fields(real_models):
         name="Quick picks",
         items=real_models.media_items.UniqueList(),
     )
-    # The uri Music Assistant routes a row's browse and items calls by.
-    assert folder.path == "ytmusic_free--contract://ytm_rec_quick_picks"
+    # No routing depends on the folder's own path or uri: the base browse
+    # builds <instance>://recommendations/<item_id> itself, and 2.10 fetches a
+    # row's items by (provider, item_id). So only the identity fields are
+    # checked here.
+    assert (folder.item_id, folder.provider, folder.name) == (
+        "ytm_rec_quick_picks",
+        "ytmusic_free--contract",
+        "Quick picks",
+    )
 
 
 def test_podcast_exposes_the_fields_the_provider_sets(real_models):
