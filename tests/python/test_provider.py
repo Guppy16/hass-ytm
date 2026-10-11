@@ -6260,10 +6260,39 @@ def test_home_feed_is_cached():
     """Only parameters Music Assistant 2.9's use_cache also has.
 
     No cache_none in particular: it exists only on 2.10, and passing it would
-    stop the provider importing on 2.9.
+    stop the provider importing on 2.9. cache_checksum is safe, it has been
+    there since 2.7.
     """
     cache = ytm.YoutubeMusicFreeProvider._get_home_feed.__ma_cache__
-    assert cache == {"expiration": ytm.HOME_FEED_CACHE_TTL, "allow_expired_cache": True}
+    assert cache == {
+        "expiration": ytm.HOME_FEED_CACHE_TTL,
+        "allow_expired_cache": True,
+        "cache_checksum": str(ytm.HOME_FEED_ROW_LIMIT),
+    }
+
+
+def test_home_feed_checksum_retires_a_feed_fetched_with_another_limit():
+    """The checksum is the row limit, so changing the limit retires old entries.
+
+    Music Assistant only compares a checksum it was given a truthy value for
+    (``not checksum or row["checksum"] == checksum``), and 1.2.2 stored its
+    six-shelf feed without one. A non-empty checksum is what turns that entry
+    into a miss on the first read after updating, instead of it being served
+    until its hour runs out. Issue #96.
+    """
+    checksum = ytm.YoutubeMusicFreeProvider._get_home_feed.__ma_cache__["cache_checksum"]
+    assert checksum == str(ytm.HOME_FEED_ROW_LIMIT)
+    assert checksum, "a falsy checksum is never compared, so it would retire nothing"
+
+
+def test_home_feed_limit_reaches_the_shelves_logged_in_feeds_put_low():
+    """A floor, so the limit cannot slide back to where 1.2.2 had it.
+
+    In the logged-in feed shared on issue #96, "Albums for you", "New
+    releases" and "Mixed for you" came 12th to 14th. ytmusicapi stops asking
+    for more shelves once it holds the limit, so six never reached them.
+    """
+    assert ytm.HOME_FEED_ROW_LIMIT >= 14
 
 
 def test_home_feed_raises_instead_of_returning_empty(provider):
