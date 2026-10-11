@@ -24,7 +24,7 @@ from __future__ import annotations
 # never reach an install. And Music Assistant would throw it away anyway:
 # ProviderManifest has no version field and mashumaro drops unknown keys, so the
 # manifest object handed to the provider never carries one. See issue #68.
-__version__ = "1.2.2"
+__version__ = "1.2.3"
 
 import asyncio
 import importlib
@@ -248,12 +248,18 @@ HOME_FEED_CACHE_TTL = 3600
 
 # Passed to get_home as its limit. ytmusicapi treats it as a minimum: it keeps
 # requesting continuation pages until it holds at least this many rows, and
-# never slices the result. The first page carries about two rows and each
+# never slices the result. The first page carries only a few rows and each
 # continuation request about three more, one sequential request each.
-# Six measured seven rows from three requests. Higher values cost more requests
-# on a cold cache, and the rows call runs under a 5 s timeout on Music
-# Assistant 2.10.
-HOME_FEED_ROW_LIMIT = 6
+# Twenty because logged-in feeds put the shelves people look for far down: in
+# the feed shared on issue #96, "Albums for you", "New releases" and "Mixed for
+# you" came 12th to 14th, and the order changes from one fetch to the next, so
+# the six that 1.2.2 asked for never reached them. That feed ran out at 19
+# shelves. The extra requests only show on a cold cache, since a warm entry is
+# refreshed in the background. On Music Assistant 2.10 the rows call runs under
+# a 5 s timeout, and a cold fetch that overruns it skips the rows for that one
+# page load while still filling the cache. The value is also the feed's cache
+# checksum, see _get_home_feed.
+HOME_FEED_ROW_LIMIT = 20
 
 # Row ids are this prefix plus a slug of the row title, see _home_row_ids.
 HOME_ROW_ID_PREFIX = "ytm_rec_"
@@ -3441,7 +3447,16 @@ class YoutubeMusicFreeProvider(MusicProvider):
                 return row.items if row is not None else UniqueList()
         return UniqueList()
 
-    @use_cache(HOME_FEED_CACHE_TTL, allow_expired_cache=True)
+    # The checksum is the row limit the payload was fetched with. Music
+    # Assistant treats an entry with a different checksum as a miss, fresh or
+    # stale, so changing the limit retires the old feed on its next read
+    # instead of serving it until its hour runs out. Entries written by 1.2.2
+    # carry no checksum at all and are retired the same way.
+    @use_cache(
+        HOME_FEED_CACHE_TTL,
+        allow_expired_cache=True,
+        cache_checksum=str(HOME_FEED_ROW_LIMIT),
+    )
     async def _get_home_feed(self, account: str) -> list[dict[str, Any]]:  # noqa: ARG002
         """The raw get_home payload, cached per account (see _home_feed_account).
 
