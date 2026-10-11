@@ -150,6 +150,28 @@ def test_item_mapping_exposes_the_fields_the_provider_sets(real_models):
     assert not missing, f"upstream ItemMapping lost fields the provider sets: {missing}"
 
 
+def test_recommendation_folder_builds_from_the_provider_fields(real_models):
+    """The provider builds every row from these four keywords and no others.
+
+    They are all Music Assistant 2.9's models accept, so the provider cannot
+    pass more. If upstream ever adds a required field, construction fails here
+    rather than every row failing to build in front of a user. Issue #96.
+    """
+    folder_cls = real_models.media_items.RecommendationFolder
+    fields = {f.name for f in dataclasses.fields(folder_cls)}
+    missing = set(ma_contract.REQUIRED_RECOMMENDATION_FOLDER_FIELDS) - fields
+    assert not missing, f"upstream RecommendationFolder lost fields: {missing}"
+
+    folder = folder_cls(
+        item_id="ytm_rec_quick_picks",
+        provider="ytmusic_free--contract",
+        name="Quick picks",
+        items=real_models.media_items.UniqueList(),
+    )
+    # The uri Music Assistant routes a row's browse and items calls by.
+    assert folder.path == "ytmusic_free--contract://ytm_rec_quick_picks"
+
+
 def test_podcast_exposes_the_fields_the_provider_sets(real_models):
     fields = {f.name for f in dataclasses.fields(real_models.media_items.Podcast)}
     missing = set(ma_contract.REQUIRED_PODCAST_FIELDS) - fields
