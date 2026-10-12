@@ -27,12 +27,14 @@ from __future__ import annotations
 __version__ = "1.2.3"
 
 import asyncio
+import functools
 import importlib
 import json
 import logging
 import os
 import re
 import time
+import unicodedata
 from collections.abc import AsyncGenerator
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any
@@ -84,7 +86,7 @@ from music_assistant_models.media_items import (
 from music_assistant_models.streamdetails import StreamDetails
 
 from music_assistant.controllers.cache import use_cache
-from music_assistant.helpers.util import infer_album_type, install_package, parse_title_and_version
+from music_assistant.helpers.util import infer_album_type, parse_title_and_version
 from music_assistant.models.music_provider import MusicProvider
 
 if TYPE_CHECKING:
@@ -806,6 +808,52 @@ def _description_text(value: Any) -> str | None:
     return None
 
 
+_VIDEO_ID_RE = re.compile(r"[\w-]{11}")
+_PLAYLIST_ID_RE = re.compile(r"[\w-]{2,64}")
+
+# Hardened build. Names, versions, owners and publishers come from whoever
+# uploaded or created the item, and Music Assistant passes them on to Home
+# Assistant, whose voice assistant is an LLM. So every such string is
+# normalised, stripped of control, zero-width, bidi and Unicode tag characters
+# (invisible text), put on one line and capped; descriptions are dropped.
+_UNSAFE_TEXT_RE = re.compile(
+    "[\x00-\x1f\x7f-\x9f\u00ad\u200b-\u200f\u2028-\u202e\u2060-\u206f"
+    "\ufe00-\ufe0f\ufeff\U000e0000-\U000e007f]"
+)
+_NAME_MAX_LEN = 100
+_SHORT_MAX_LEN = 60
+
+
+def _clean_text(value: Any, max_len: int = _NAME_MAX_LEN) -> Any:
+    """Return ``value`` as single-line, visible text of at most ``max_len`` characters."""
+    if not isinstance(value, str):
+        return value
+    text = _UNSAFE_TEXT_RE.sub(" ", unicodedata.normalize("NFKC", value))
+    text = " ".join(text.split())
+    return text if len(text) <= max_len else text[: max_len - 1].rstrip() + "\u2026"
+
+
+def _scrub_item(item: Any) -> Any:
+    """Clean the free-text fields of a parsed item and its nested mappings, in place."""
+    if item is None:
+        return None
+    if isinstance(getattr(item, "name", None), str):
+        item.name = _clean_text(item.name)
+    for attr in ("version", "owner", "publisher"):
+        if isinstance(getattr(item, attr, None), str):
+            setattr(item, attr, _clean_text(getattr(item, attr), _SHORT_MAX_LEN))
+    metadata = getattr(item, "metadata", None)
+    if metadata is not None and getattr(metadata, "description", None) is not None:
+        metadata.description = None
+    for artist in getattr(item, "artists", None) or ():
+        _scrub_item(artist)
+    for attr in ("album", "podcast"):
+        nested = getattr(item, attr, None)
+        if nested is not None and not isinstance(nested, str):
+            _scrub_item(nested)
+    return item
+
+
 def _normalize_artist_name(value: str) -> str:
     """Fold an artist name to a form two spellings of it can both match."""
     return " ".join(str(value).split()).casefold()
@@ -1207,19 +1255,6 @@ def _build_config_entries() -> tuple[ConfigEntry, ...]:
             "Names match loosely, ignoring case and extra spaces; channel ids match "
             "exactly and are the reliable choice when two artists share a name. Lines "
             "starting with # are ignored.",
-        ),
-        ConfigEntry(
-            key=CONF_AI_BLOCKLIST_URL,
-            type=ConfigEntryType.STRING,
-            label="Blocklist URL (optional)",
-            default_value="",
-            required=False,
-            depends_on=CONF_FILTER_AI_MUSIC,
-            description="Optional: a URL serving a community-maintained list, merged with "
-            "your own entries above. Accepts a JSON array of names or channel ids, a JSON "
-            "object with an 'artists' key, or plain text one per line. Refreshed in the "
-            "background about twice a day; if the URL is unreachable the last good list "
-            "keeps working and nothing is filtered that was not already.",
         ),
     )
 
@@ -2547,9 +2582,11 @@ class YoutubeMusicFreeProvider(MusicProvider):
         fail, but the caller now logs that failure rather than discarding it.
         """
         bare_id = _strip_browse_prefix(playlist_id)
+        if not _PLAYLIST_ID_RE.fullmatch(bare_id):
+            raise MediaNotFoundError(f"Invalid playlist id {playlist_id!r}")
         if bare_id.startswith(_YT_RADIO_PREFIX):
             seed = seed_video_id or _radio_seed_video_id(playlist_id)
-            if seed:
+            if seed and _VIDEO_ID_RE.fullmatch(seed):
                 return f"https://www.youtube.com/watch?v={seed}&list={bare_id}"
         return f"https://www.youtube.com/playlist?list={bare_id}"
 
@@ -3326,8 +3363,9 @@ class YoutubeMusicFreeProvider(MusicProvider):
 
     async def library_add(self, item: MediaItemType) -> bool:
         """Add an item to the user's library."""
-        if not self._authenticated:
-            return False
+        # Hardened build: library writes are disabled, so no voice command or
+        # LLM tool call can like, rate or subscribe on the Google account.
+        return False
         prov_mapping = next(
             (m for m in item.provider_mappings if m.provider_instance == self.instance_id),
             None,
@@ -3363,8 +3401,8 @@ class YoutubeMusicFreeProvider(MusicProvider):
 
     async def library_remove(self, prov_item_id: str, media_type: MediaType) -> bool:
         """Remove an item from the user's library."""
-        if not self._authenticated:
-            return False
+        # Hardened build: library writes are disabled (see library_add).
+        return False
         try:
             if media_type == MediaType.ARTIST:
                 await asyncio.to_thread(self._ytmusic.unsubscribe_artists, [prov_item_id])
@@ -3628,7 +3666,8 @@ class YoutubeMusicFreeProvider(MusicProvider):
     def _load_ai_filter_config(self) -> None:
         """Read the filter settings into the sets the hot path consults."""
         self._ai_filter_enabled = bool(self.config.get_value(CONF_FILTER_AI_MUSIC))
-        self._ai_blocklist_url = str(self.config.get_value(CONF_AI_BLOCKLIST_URL) or "").strip()
+        # Hardened build: the remote list is removed, so nothing is ever fetched.
+        self._ai_blocklist_url = ""
         raw = str(self.config.get_value(CONF_AI_BLOCKLIST) or "")
         # Semicolons, not commas. A single-line config box needs some in-line
         # separator, and commas are far too common inside real artist names:
@@ -3838,6 +3877,8 @@ class YoutubeMusicFreeProvider(MusicProvider):
                     MIN_YTDLP_REQUIREMENT,
                 )
 
+            if not _VIDEO_ID_RE.fullmatch(video_id):
+                raise MediaNotFoundError(f"Invalid video id {video_id!r}")
             url = f"{YTM_DOMAIN}/watch?v={video_id}"
             ydl_opts = {
                 "quiet": True,
@@ -4437,16 +4478,9 @@ class YoutubeMusicFreeProvider(MusicProvider):
         take browsing down with it (and the import checks below still stop a
         genuinely absent package).
         """
-        for pkg in (MIN_YTDLP_REQUIREMENT, "ytmusicapi"):
-            try:
-                await install_package(pkg)
-            except Exception as err:  # noqa: BLE001 - degrade to what's installed
-                self.logger.warning(
-                    "could not install or upgrade %s: %s. Continuing with "
-                    "whatever is already installed.",
-                    pkg,
-                    err,
-                )
+        # Hardened build: nothing is installed at runtime. The image pins and
+        # hash-checks yt-dlp and ytmusicapi (requirements.lock); upgrading them
+        # is an image rebuild, so a PyPI release never runs here unreviewed.
         try:
             await asyncio.to_thread(importlib.import_module, "yt_dlp")
         except ImportError as err:
@@ -4455,3 +4489,35 @@ class YoutubeMusicFreeProvider(MusicProvider):
             await asyncio.to_thread(importlib.import_module, "ytmusicapi")
         except ImportError as err:
             raise SetupFailedError("ytmusicapi failed to install") from err
+
+
+def _scrubbed(method: Any) -> Any:
+    """Wrap a provider method so whatever item it returns is scrubbed."""
+    if asyncio.iscoroutinefunction(method):
+
+        @functools.wraps(method)
+        async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+            return _scrub_item(await method(*args, **kwargs))
+
+        return async_wrapper
+
+    @functools.wraps(method)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        return _scrub_item(method(*args, **kwargs))
+
+    return wrapper
+
+
+for _name in (
+    "_parse_track",
+    "_parse_album",
+    "_parse_artist",
+    "_parse_playlist",
+    "_parse_podcast",
+    "_parse_podcast_episode",
+    "_get_item_mapping",
+    "_home_feed_row",
+    "_get_playlist_via_ytdlp",
+    "get_artist",
+):
+    setattr(YoutubeMusicFreeProvider, _name, _scrubbed(getattr(YoutubeMusicFreeProvider, _name)))

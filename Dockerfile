@@ -1,17 +1,18 @@
-# Base image version (moving tags: latest, beta, nightly)
-# Declared before the first FROM so it is usable in the FROM line below.
-ARG MA_VERSION=latest
+# Hardened build: the base image is pinned by digest (music-assistant/server 2.10.6),
+# and the provider's Python dependencies are pinned and hash-checked
+# (requirements.lock, compiled from requirements.in against the base image's own
+# packages so nothing of upstream gets upgraded). The provider installs nothing at
+# runtime. To update, bump the digest and/or requirements.in, recompile the lock
+# with --generate-hashes and rebuild.
+FROM ghcr.io/music-assistant/server@sha256:45fdb050e06962097a07feeb092606ad119fac17965c8228a57146448d5fa772 AS runtime
 
-# --- Stage: runtime -----------------------------------------------------------
-FROM ghcr.io/music-assistant/server:${MA_VERSION} AS runtime
+LABEL org.opencontainers.image.description="Hardened local build of the upstream server image with the ytmusic_free provider."
 
-# Add OCI labels for basic image introspection
-LABEL org.opencontainers.image.source="https://github.com/sproft/ytmusic-free-provider" \
-      org.opencontainers.image.description="Unofficial build of the upstream server image with the ytmusic_free YouTube Music provider pre-installed. Independent community project, not affiliated with or endorsed by the upstream project."
+COPY requirements.lock /tmp/requirements.lock
+RUN uv pip install --python /app/venv/bin/python --no-deps --require-hashes \
+        -r /tmp/requirements.lock && \
+    rm /tmp/requirements.lock
 
-# Copy the provider directory from the build context into the base image and
-# detect the active Python version to move files to the correct site-packages
-# folder.
 COPY ytmusic_free/ /tmp/ytmusic_free
 # Resolve the site-packages path via Python itself (no globbing, no
 # hard-coded version fallback): if the venv Python is broken, the build
