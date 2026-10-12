@@ -20,3 +20,10 @@ COPY ytmusic_free/ /tmp/ytmusic_free
 RUN DST_DIR="$( /app/venv/bin/python -c 'import sysconfig; print(sysconfig.get_path("purelib"))' )/music_assistant/providers/ytmusic_free" && \
     rm -rf "$DST_DIR" && \
     mv /tmp/ytmusic_free "$DST_DIR"
+
+# Smart Fades analyses only tracks up to 5 minutes (upstream: 30). Longer tracks
+# (mixes, live sets) get a standard crossfade and cost no analysis CPU. The grep
+# fails the build if upstream changes the line, so the cap never silently lapses.
+RUN F="$( /app/venv/bin/python -c 'import sysconfig; print(sysconfig.get_path("purelib"))' )/music_assistant/providers/smart_fades/provider.py" && \
+    sed -i 's/^    max_analysis_duration = ACCUMULATING_ANALYSIS_MAX_DURATION_SECONDS$/    max_analysis_duration = 300.0/' "$F" && \
+    grep -q '^    max_analysis_duration = 300.0$' "$F"
